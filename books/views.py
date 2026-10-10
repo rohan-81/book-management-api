@@ -1,127 +1,99 @@
-from django.contrib.messages import error
-from django.core import serializers
-from django.core.serializers import serialize
-from django.shortcuts import render,redirect
-from .serializers import *
-from .models import *
-from rest_framework import status
+from rest_framework import viewsets, status, filters
+from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from django.db.models import Avg, Count
+
+from .models import Author, Book
+from .serializers import AuthorSerializer, BookSerializer
 
 
-# Create your views here.
+class AuthorViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for Authors with full CRUD:
+    - GET /api/authors/
+    - POST /api/authors/
+    - GET /api/authors/{id}/
+    - PUT /api/authors/{id}/
+    - PATCH /api/authors/{id}/
+    - DELETE /api/authors/{id}/
+    - GET /api/authors/{id}/books/ (Custom action: all books by this author)
+    """
+    queryset = Author.objects.annotate(book_count=Count('books')).order_by('name')
+    serializer_class = AuthorSerializer
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'email']
+    ordering_fields = ['id', 'name']
 
-class AuthorListCreateView(APIView):
-    def get (self,request):
-        authors=Author.objects.all()
-        serializer=AuthorSerializer(authors,many=True)
-        return Response (serializer.data)
-
-    def post(self,request):
-        serializer=AuthorSerializer(data=request.data)
-
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.data, status=status.HTTP_400_BAD_REQUEST)  
-
-class BookListCreateView(APIView):
-    def get (self,request):
-        books=Book.objects.all()
-        serializer=BookSerializer(books,many=True)
-        return Response (serializer.data)
-
-    def post(self,request):
-        serializer=BookSerializer(data=request.data)
-
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.data, status=status.HTTP_400_BAD_REQUEST)  
-
-class BookDetailView(APIView):
-
-    def get_object(self, pk):
-        try:
-            return Book.objects.get(pk=pk)
-        except Book.DoesNotExist:
-            return None
-
-    def get(self, request, pk):
-        book = self.get_object(pk)
-
-        if book is None:
-            return Response(
-                {"detail": "Book not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        serializer = BookSerializer(book)
-
+    @action(detail=True, methods=['get'])
+    def books(self, request, pk=None):
+        """Get all books written by this author."""
+        author = self.get_object()
+        books = author.books.all()
+        serializer = BookSerializer(books, many=True)
         return Response(serializer.data)
 
-    def put(self, request, pk):
-        book = self.get_object(pk)
 
-        if book is None:
-            return Response(
-                {"detail": "Book not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+class BookViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for Books with full CRUD:
+    - GET /api/books/
+    - POST /api/books/
+    - GET /api/books/{id}/
+    - PUT /api/books/{id}/
+    - PATCH /api/books/{id}/
+    - DELETE /api/books/{id}/
+    - POST /api/books/{id}/toggle-availability/ (Toggle book status)
+    - GET /api/books/stats/ (Summary statistics)
+    """
+    queryset = Book.objects.select_related('author').all()
+    serializer_class = BookSerializer
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['title', 'description', 'author__name']
+    ordering_fields = ['price', 'created_at', 'title', 'published_date']
+    ordering = ['-created_at']
 
-        serializer = BookSerializer(
-            book,
-            data=request.data
-        )
+    def get_queryset(self):
+        """Support filtering by author ID and availability status."""
+        queryset = super().get_queryset()
+        author_id = self.request.query_params.get('author')
+        available = self.request.query_params.get('available')
 
-        if serializer.is_valid():
-            serializer.save()
+        if author_id and author_id.isdigit():
+            queryset = queryset.filter(author_id=int(author_id))
 
-            return Response(serializer.data)
+        if available is not None:
+            if available.lower() in ['true', '1']:
+                queryset = queryset.filter(available=True)
+            elif available.lower() in ['false', '0']:
+                queryset = queryset.filter(available=False)
 
-        return Response(
-            serializer.errors,
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return queryset
 
-    def patch(self, request, pk):
-        book = self.get_object(pk)
+    @action(detail=True, methods=['post', 'patch'], url_path='toggle-availability')
+    def toggle_availability(self, request, pk=None):
+        """Toggle availability of a book."""
+        book = self.get_object()
+        book.available = not book.available
+        book.save()
+        serializer = self.get_serializer(book)
+        return Response({
+            'message': f'Book "{book.title}" availability toggled to {book.available}.',
+            'book': serializer.data
+        }, status=status.HTTP_200_OK)
 
-        if book is None:
-            return Response(
-                {"detail": "Book not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """Return library overview statistics."""
+        total_books = Book.objects.count()
+        available_books = Book.objects.filter(available=True).count()
+        total_authors = Author.objects.count()
+        avg_price_data = Book.objects.aggregate(avg_price=Avg('price'))
+        avg_price = avg_price_data['avg_price'] or 0.00
 
-        serializer = BookSerializer(
-            book,
-            data=request.data,
-            partial=True
-        )
-
-        if serializer.is_valid():
-            serializer.save()
-
-            return Response(serializer.data)
-
-        return Response(
-            serializer.errors,
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    def delete(self, request, pk):
-        book = self.get_object(pk)
-
-        if book is None:
-            return Response(
-                {"detail": "Book not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        book.delete()
-
-        return Response(
-            status=status.HTTP_204_NO_CONTENT
-        )
-
+        return Response({
+            'total_books': total_books,
+            'available_books': available_books,
+            'out_of_stock_books': total_books - available_books,
+            'total_authors': total_authors,
+            'avg_price': round(float(avg_price), 2)
+        })
